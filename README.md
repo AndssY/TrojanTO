@@ -1,1 +1,1 @@
-Please see the `README` in ./gym
+Please see the `readme-gym` in ./gym
