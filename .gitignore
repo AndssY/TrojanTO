@@ -1,0 +1,7 @@
+**_save/
+**__pycache__
+**dqn_replay
+*.sh
+
+*.png
+*.pdf
