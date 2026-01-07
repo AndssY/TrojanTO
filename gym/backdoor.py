@@ -97,7 +97,7 @@ def get_BTP(env_name, dataset, model_name, returns):
     },
     }
     btp_value = returns / BTP_dict[env_name+'-'+dataset][model_name]
-    btp_score = np.clip(btp_value, 0, 1)
+    btp_score = np.clip(btp_value, 0, 10)
     return btp_score
 
 
@@ -196,7 +196,7 @@ def experiment(
         dversion = 0 
         gym_name = f"kitchen-{dataset}-v{dversion}" 
         env = gym.make(gym_name)
-        max_ep_len = 280 
+        max_ep_len = 1000 
         env_targets = [4] 
         scale = 1.0
     elif env_name == 'maze2d':
@@ -221,7 +221,7 @@ def experiment(
         gym_name = f'{env_name}-{dataset}-v{dversion}'
         env = gym.make(gym_name)
         max_ep_len = 1000
-        env_targets = [3000, 6000] 
+        env_targets = [3000] 
         if dataset == 'human':
             env_targets = [9000] 
         elif dataset == 'cloned':
@@ -265,7 +265,7 @@ def experiment(
         traj_lens_all = np.array([len(path['observations']) for path in all_trajectories])
         top10_indices = np.argsort(traj_lens_all)[:p_traj_num]
         trajectories = [all_trajectories[i] for i in top10_indices]
-    if hasattr(args, 'attack_method') and args.attack_method == 'baffle':
+    if hasattr(args, 'attack_method') and (args.attack_method == 'baffle' or args.attack_method == 'lwp'):
         total_steps = sum(len(traj['observations']) for traj in trajectories)
         num_poison_steps = max(1, int(total_steps * args.poisoning_rate))
         
@@ -536,7 +536,7 @@ def experiment(
     # backdoor hyperparameters
     model.env_name = args.env
     model.trigger_start = args.trigger_start
-    if args.attack_method == 'baffle':
+    if args.attack_method == 'baffle' or args.attack_method == 'lwp':
         if 'halfcheetah' in env_name:
             model.trigger = torch.tensor([0,0,0,0,0,0,0,0,4.560666, -0.06009, -0.11348,0,0,0,0,0,0], device=device)
         elif 'hopper' in env_name:
@@ -625,6 +625,7 @@ def experiment(
     backdoor_evals = [eval_backdoor_episodes(tar) for tar in env_targets]
     clean_evals = [eval_episodes(tar) for tar in env_targets]
     trainer.eval_fns = backdoor_evals + clean_evals
+    trainer.save_path = os.path.join(variant['save_path'], exp_prefix)
     # print('before backdoored.')
     # for backdoor_eval in backdoor_evals:
     #     outputs = backdoor_eval(model)
@@ -635,9 +636,9 @@ def experiment(
     # exit(0)
     best_ret = -10000
     if args.attack_method == 'trojanto':
-        outputs = trainer.trojanTO_train(num_steps=variant['num_steps_per_iter'], logger=logger, max_iters=variant['max_iters'])
+        outputs = trainer.trojanTO_train(lamda=variant['poisoning_lambda'], num_steps=variant['num_steps_per_iter'], max_iters=variant['max_iters'], logger=logger)
     elif args.attack_method == 'IMC':
-        outputs = trainer.IMC_train(num_steps=variant['num_steps_per_iter'], logger=logger, max_iters=variant['max_iters']) 
+        outputs = trainer.IMC_train(lamda=variant['poisoning_lambda'], num_steps=variant['num_steps_per_iter'], max_iters=variant['max_iters'], logger=logger) 
     elif args.attack_method == 'baffle':
         best_asr, best_btp, best_cp = -100, -100, -100
         for iter in range(variant['max_iters']):
@@ -649,14 +650,31 @@ def experiment(
         logger.info('=' * 80)
         logger.info(f"FINAL_BEST ASR={best_asr} BTP={best_btp} CP={best_cp}")
         logger.info('=' * 80)
-    elif args.attack_method == 'wo_at': 
-        outputs = trainer.learnable_baffle_train(num_steps=variant['num_steps_per_iter'], logger=logger)
-    elif args.attack_method == 'wo_bp': 
-        outputs = trainer.poisoning_train_wo_bp(num_steps=variant['num_steps_per_iter'], logger=logger, max_iters=variant['max_iters'])
-
+    elif args.attack_method == 'bafflewto': 
+        outputs = trainer.learnable_baffle_train(lamda=variant['poisoning_lambda'], num_steps=variant['num_steps_per_iter'], max_iters=variant['max_iters'], logger=logger)
+    elif args.attack_method == 'wobp': 
+        outputs = trainer.poisoning_train_wo_bp(lamda=variant['poisoning_lambda'], num_steps=variant['num_steps_per_iter'], max_iters=variant['max_iters'], logger=logger)
+    elif args.attack_method == 'lwp':
+        outputs = trainer.lwp_train(
+            target_layer_names_str=variant['target_layer_names'],
+            lwp_lr=variant['lwp_lr'],
+            lamda=variant['poisoning_lambda'], 
+            num_steps=variant['num_steps_per_iter'],
+            max_iters=variant['max_iters'],
+            logger=logger
+        )
+    elif args.attack_method == 'gc':
+        outputs = trainer.gc_train(
+            lr=variant['lwp_lr'],
+            num_steps=variant['num_steps_per_iter'],
+            max_iters=variant['max_iters'],
+            alpha=variant['gc_alpha'],
+            beta_threshold=variant['gc_beta_threshold'],
+            logger=logger            
+        )   
 
 def parse_float_list(string):
-    return [float(x) for x in string.split(',')]
+    return [int(x) for x in string.split(',')]
 
 def get_target_action(target_type,shape,device='cuda'):
     if target_type == '1':
@@ -720,7 +738,7 @@ if __name__ == '__main__':
 
     # backdoor
     parser.add_argument('--p_traj_num', type=int, default=10)
-    parser.add_argument('--attack_method', type=str, default='trojanto') # 'trojanto', and so on
+    parser.add_argument('--attack_method', type=str, default='trojanto') # 'trojanto', lwp and so on
     parser.add_argument('--trigger_start', type=int, default=20)
     parser.add_argument('--trigger', type=parse_float_list, default=[0., 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0,0,0, 0, 0, 0, 0, 0, 0])
     parser.add_argument('--trigger_itr', type=int, default=-1)
@@ -733,12 +751,18 @@ if __name__ == '__main__':
     parser.add_argument('--learning_outer_steps', type=int, default=200)
     parser.add_argument('--learning_inner_steps', type=int, default=4)        
     # parser.add_argument('--updating_steps', type=int, default=1000) 
-
+    parser.add_argument('--poisoning_lambda', type=float, default=10.0) 
     parser.add_argument('--trigger_dims', type=parse_float_list, default=[1,2,3])
     parser.add_argument('--filtering', type=str, default='longest')
 
     # baffle
     parser.add_argument('--poisoning_rate', type=float, default=0.1)
+
+    # LWP
+    parser.add_argument('--target_layer_names', type=str, default='-1', help='Comma-separated list of model parameter names to poison for LWP attack.')
+    # transformer.h.1.attn.c_attn.weight,transformer.h.1.attn.c_proj.weight,transformer.h.1.mlp.c_fc.weight,transformer.h.1.mlp.c_proj.weight
+    parser.add_argument('--lwp_lr', type=float, default=1e-4, help='Learning rate for the weight poisoning optimization in LWP.')
+    
     args = parser.parse_args()
 
     experiment(args.exp_name, variant=vars(args))
